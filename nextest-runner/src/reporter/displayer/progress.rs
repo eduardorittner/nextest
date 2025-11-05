@@ -991,10 +991,11 @@ pub(super) fn write_summary_str(run_stats: &RunStats, styles: &Styles, out: &mut
         setup_scripts_timed_out: _,
         passed,
         passed_slow,
+        passed_timed_out,
         flaky,
         failed,
         failed_slow: _,
-        timed_out,
+        failed_timed_out,
         leaky,
         leaky_failed,
         exec_failed,
@@ -1009,13 +1010,20 @@ pub(super) fn write_summary_str(run_stats: &RunStats, styles: &Styles, out: &mut
         "passed".style(styles.pass)
     );
 
-    if passed_slow > 0 || flaky > 0 || leaky > 0 {
-        let mut text = Vec::with_capacity(3);
+    if passed_slow > 0 || passed_timed_out > 0 || flaky > 0 || leaky > 0 {
+        let mut text = Vec::with_capacity(4);
         if passed_slow > 0 {
             text.push(format!(
                 "{} {}",
                 passed_slow.style(styles.count),
                 "slow".style(styles.skip),
+            ));
+        }
+        if passed_timed_out > 0 {
+            text.push(format!(
+                "{} {}",
+                passed_timed_out.style(styles.count),
+                "timed out".style(styles.skip),
             ));
         }
         if flaky > 0 {
@@ -1043,13 +1051,23 @@ pub(super) fn write_summary_str(run_stats: &RunStats, styles: &Styles, out: &mut
             failed.style(styles.count),
             "failed".style(styles.fail),
         );
-        if leaky_failed > 0 {
-            swrite!(
-                out,
-                " ({} due to being {})",
-                leaky_failed.style(styles.count),
-                "leaky".style(styles.fail),
-            );
+        if leaky_failed > 0 || failed_timed_out > 0 {
+            let mut text = Vec::with_capacity(4);
+            if leaky_failed > 0 {
+                text.push(format!(
+                    "{} due to being {}",
+                    leaky_failed.style(styles.count),
+                    "leaky".style(styles.skip),
+                ));
+            }
+            if failed_timed_out > 0 {
+                text.push(format!(
+                    "{} due to {}",
+                    failed_timed_out.style(styles.count),
+                    "timeout".style(styles.skip),
+                ));
+            }
+            swrite!(out, " ({})", text.join(", "));
         }
         swrite!(out, ", ");
     }
@@ -1060,15 +1078,6 @@ pub(super) fn write_summary_str(run_stats: &RunStats, styles: &Styles, out: &mut
             "{} {}, ",
             exec_failed.style(styles.count),
             "exec failed".style(styles.fail),
-        );
-    }
-
-    if timed_out > 0 {
-        swrite!(
-            out,
-            "{} {}, ",
-            timed_out.style(styles.count),
-            "timed out".style(styles.fail),
         );
     }
 
@@ -1242,7 +1251,7 @@ mod tests {
                 RunStats {
                     initial_run_count: 20,
                     finished_count: 10,
-                    timed_out: 1,
+                    failed_timed_out: 1,
                     cancel_reason: Some(CancelReason::TestFailure),
                     ..RunStats::default()
                 },

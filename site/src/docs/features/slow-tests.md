@@ -42,6 +42,24 @@ Nextest lets you optionally specify a number of `slow-timeout` periods after whi
 slow-timeout = { period = "30s", terminate-after = 4 }
 ```
 
+### Configuring timeout behavior
+
+<!-- md:version 0.9.88 -->
+
+By default, tests that time out are treated as failures. You can configure this behavior using the `on-timeout` parameter. For example, to treat timeouts as successes:
+
+```toml title="Timeouts as successes"
+[profile.default]
+slow-timeout = { period = "30s", terminate-after = 4, on-timeout = "pass" }
+```
+
+The possible values for `on-timeout` are:
+- `"fail"` (default): Tests that time out are treated as failures
+- `"pass"`: Tests that time out are treated as successes
+
+This can be useful in scenarios where you want to mark tests that take too long as passing, such as in environments where resource constraints might cause legitimate slowdowns.
+```
+
 ### Example
 
 The run below is configured with:

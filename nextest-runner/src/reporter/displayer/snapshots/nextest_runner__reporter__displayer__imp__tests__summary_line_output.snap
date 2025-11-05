@@ -1,12 +1,11 @@
 ---
 source: nextest-runner/src/reporter/displayer/imp.rs
 expression: "String::from_utf8(out).expect(\"output only consists of UTF-8\")"
-snapshot_kind: text
 ---
 ────────────
      Summary [   2.000s] 5 tests run: 5 passed, 0 skipped
 ────────────
-     Summary [  15.750s] 8/10 tests run: 5 passed (1 slow, 1 flaky, 1 leaky), 2 failed, 1 exec failed, 1 timed out, 2 skipped
+     Summary [  15.750s] 8/10 tests run: 5 passed (1 slow, 2 timed out, 1 flaky, 1 leaky), 2 failed, 1 exec failed, 1 timed out, 2 skipped
 warning: 2/10 tests were not run due to signal
 ────────────
      Summary [ 120.000s] 25/50 stress run iterations: 25 passed
