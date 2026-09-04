@@ -471,6 +471,18 @@ Portable recordings contain the full captured output of every test in the run. T
 
 The output store is stored without further compression. Storing the output store with compression would save 15-20% in space (owing to zip headers and per-entry metadata being compressed), but would require extracting the archive: random access into a compressed stream requires something like the [Zstandard Seekable Format](https://github.com/facebook/zstd/blob/dev/contrib/seekable_format/zstd_seekable_compression_format.md). We expect compressed transfers with [`Content-Encoding`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Content-Encoding) to recover these gains in transit.
 
+## JUnit export
+
+Recordings carry everything needed to generate a [JUnit report](../../machine-readable/junit.md) after the fact, via `cargo nextest store export-junit`. This makes JUnit generation a two-step process—record, then export—which addresses long-standing issues with the store directory not obeying `CARGO_TARGET_DIR`: the export writes to a path the user provides.
+
+Two design decisions are worth noting:
+
+* **Resolved settings ride inside the recording.** The per-test JUnit settings (output storage, skip reporting, flaky-fail status) are resolved against repository configuration at run time and baked into the recorded events; report-level settings (the report name) are stored in the recorded run options. As a consequence, exports need no repository configuration, work for portable recordings on machines without the workspace, and are unaffected by configuration drift after the run. The alternative—storing the raw repository configuration in the archive and re-resolving at export time—would permit changing policy after the fact, but requires configuration parsing and per-test query evaluation at export time, plus a story for configuration version skew. The archive format is additive, so this could still be added later.
+
+* **The export shares the live JUnit code path.** Recorded events are converted back to live test events (the same mechanism replay uses) and fed to the same report builder as live JUnit output. The exported report is therefore byte-for-byte identical to the report a live run would have written, a property locked in by an integration test.
+
+Because the recording is an event stream, exports also work for interrupted runs: the report includes every test that finished before the interruption, with the report header synthesized from run metadata. Live JUnit output cannot provide this, since it only writes the report when the run finishes.
+
 ## Related work
 
 Nextest's record and replay feature uses many techniques from various prior systems, combining them in a way that appears to be novel.
@@ -499,4 +511,4 @@ Using property-based tests to ensure lossless roundtrips is a standard technique
 
 Many of the UX details such as unique prefix highlighting are directly inspired by [Jujutsu](https://github.com/jj-vcs/jj). We are deeply indebted to Jujutsu for showing what excellence in dev tools looks like.
 
-_Last substantive revision: 2026-02-03_
+_Last substantive revision: 2026-09-04_

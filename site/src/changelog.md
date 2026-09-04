@@ -10,6 +10,20 @@ toc_depth: 1
 This page documents new features and bugfixes for cargo-nextest. Please see the [stability
 policy](https://nexte.st/docs/stability/) for how versioning works with cargo-nextest.
 
+## Unreleased
+
+### Added
+
+- Recorded runs can now be exported as JUnit XML reports with the experimental `cargo nextest store export-junit` command. The exported report is identical to the report a live run with `junit.path` configured would have written, because both are produced by the same code from the same events. Exports work without `junit.path` set, work from [portable recordings](https://nexte.st/docs/features/record-replay-rerun/portable-recordings/) on machines without the workspace, and produce reports even for interrupted runs. See [_JUnit export_](https://nexte.st/docs/features/record-replay-rerun/junit-export/). ([#883], [#2066])
+
+### Changed
+
+- JUnit configuration settings other than `path` (`report-name`, `store-success-output`, `store-failure-output`, `report-skipped`, and `flaky-fail-status`) are now resolved even when `junit.path` is not set, so that recordings carry the correct values for later export. Live JUnit reports are still only written when `junit.path` is set.
+- The store format version for recorded runs is now 2.2: recordings now capture setup script JUnit settings and the resolved JUnit report name. Recordings made by this version cannot be read by older versions of nextest. Older recordings can still be read, though JUnit reports exported from them omit setup script output.
+
+[#883]: https://github.com/nextest-rs/nextest/issues/883
+[#2066]: https://github.com/nextest-rs/nextest/issues/2066
+
 ## [0.9.143] - 2026-08-04
 
 ### Added

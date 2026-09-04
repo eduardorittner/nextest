@@ -17,6 +17,12 @@ path = "junit.xml"
 
 If `--profile ci` is selected on the command line, a JUnit report will be written out to `target/nextest/ci/junit.xml` within the workspace root.
 
+!!! experimental "Experimental: Exporting JUnit reports from recorded runs"
+
+    With the experimental [record, replay and rerun](../features/record-replay-rerun/index.md) feature enabled, a JUnit report can also be exported from a recorded run with `cargo nextest store export-junit`. This works without setting `junit.path`, writes the report to a path of your choosing, and produces reports even for interrupted runs. See [_JUnit export_](../features/record-replay-rerun/junit-export.md).
+
+    Once recording stabilizes, the two-step record-then-export flow is expected to become the recommended way to produce JUnit reports. The `junit.path` flow documented on this page remains the current stable path.
+
 Some notes about the JUnit support:
 
 - There are several slightly different formats all called "JUnit" or "XUnit". Nextest adheres to the [Jenkins XML format](https://llg.cubic.org/docs/junit/).

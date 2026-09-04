@@ -115,6 +115,7 @@ exit "$NEXTEST_EXIT"
 - [_Replaying test runs_](replay.md) — replay recorded runs, including with different reporter options.
 - [_Portable recordings_](portable-recordings.md) — export and share recordings across machines.
 - [_Perfetto traces_](perfetto-chrome-traces.md) — visualize and analyze test runs.
+- [_JUnit export_](junit-export.md) — generate JUnit XML reports from recorded runs.
 - [_Managing recorded runs_](managing-runs.md) — list, prune, and configure the record store.
 
 ## Configuration options
