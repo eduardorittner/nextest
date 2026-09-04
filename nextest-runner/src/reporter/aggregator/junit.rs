@@ -1003,6 +1003,49 @@ mod tests {
     }
 
     #[test]
+    fn test_build_report_with_trailer() {
+        let binary_id = RustBinaryId::new("my-crate::my-bin");
+        let test_name = TestCaseName::new("tests::my_skipped_test");
+        let test_instance = TestInstanceId {
+            binary_id: &binary_id,
+            test_name: &test_name,
+        };
+
+        let mut builder = JunitReportBuilder::new(NextestRunMode::Test, "my-report");
+        let timestamp = chrono::Utc::now().fixed_offset();
+        builder
+            .write_event(*skipped_test_event(
+                timestamp,
+                test_instance,
+                ReportSkipPolicy::All,
+            ))
+            .expect("write_event for skipped test succeeds");
+
+        // No RunFinished event was seen, so no report is available.
+        assert!(
+            builder.take_report().is_none(),
+            "no report before RunFinished"
+        );
+
+        let run_id = ReportUuid::new_v4();
+        let report =
+            builder.build_report_with_trailer(run_id, timestamp, Duration::from_millis(1500));
+        assert_eq!(report.name.as_str(), "my-report", "report name");
+        assert_eq!(report.uuid, Some(run_id), "report uuid from the trailer");
+        assert_eq!(
+            report.timestamp,
+            Some(timestamp),
+            "report timestamp from the trailer"
+        );
+        assert_eq!(
+            report.time,
+            Some(Duration::from_millis(1500)),
+            "report time from the trailer"
+        );
+        assert_eq!(report.test_suites.len(), 1, "test suite is present");
+    }
+
+    #[test]
     fn test_skipped_omitted_when_policy_is_none() {
         let binary_id = RustBinaryId::new("my-crate::my-bin");
         let test_name = TestCaseName::new("tests::my_skipped_test");

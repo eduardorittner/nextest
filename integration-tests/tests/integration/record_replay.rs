@@ -8,7 +8,7 @@
 use crate::{
     fixtures::{
         check_rerun_expanded_output, check_rerun_output, check_run_output,
-        check_run_output_for_test_names,
+        check_run_output_for_test_names, check_run_output_with_junit,
     },
     temp_project::TempProject,
 };
@@ -2243,7 +2243,7 @@ fn test_replayability_store_version_too_new() {
 
     // Each dependent command should exit with SETUP_ERROR and surface the
     // StoreVersionIncompatible diagnostic.
-    let cases: [(&str, &[&str]); 4] = [
+    let cases: [(&str, &[&str]); 5] = [
         ("replay", &["replay", "--run-id", RUN_ID]),
         ("run_rerun", &["run", "--rerun", RUN_ID]),
         ("store_export", &["store", "export", RUN_ID]),
@@ -2251,6 +2251,7 @@ fn test_replayability_store_version_too_new() {
             "store_export_chrome_trace",
             &["store", "export-chrome-trace", RUN_ID],
         ),
+        ("store_export_junit", &["store", "export-junit", RUN_ID]),
     ];
     for (command_label, args) in cases {
         let out = cli_with_recording(&env_info, &p, &cache_dir, &user_config_path, None)
@@ -3273,5 +3274,434 @@ fn test_replay_output_not_captured() {
     insta::assert_snapshot!(
         "replay_output_not_captured",
         redact_dynamic_fields(&stdout, temp_root)
+    );
+}
+
+// --- JUnit export tests ---
+
+/// Runs `store export-junit` with the given arguments and returns the exported
+/// XML from stdout.
+#[track_caller]
+fn export_junit_stdout(
+    env_info: &TestEnvInfo,
+    p: &TempProject,
+    cache_dir: &Utf8Path,
+    user_config_path: &Utf8Path,
+    args: &[&str],
+) -> String {
+    let mut cli = cli_with_recording(env_info, p, cache_dir, user_config_path, None);
+    cli.args(["store", "export-junit"]);
+    cli.args(args.iter().copied());
+    let output = cli.output();
+    assert!(
+        output.exit_status.success(),
+        "store export-junit {args:?} should succeed: {output}"
+    );
+    output.stdout_as_str().into_owned()
+}
+
+/// JUnit export from a recorded run.
+///
+/// Coverage: `store export-junit` with `latest`, a full run ID, a unique
+/// prefix, `-o`, `--report-name`, a portable recording path, and a named pipe
+/// (non-seekable input). The exported XML must be byte-for-byte identical to
+/// the report written by the live JUnit aggregator, because both derive from
+/// the same recorded events. The exported report is also verified against the
+/// fixture model, which covers per-test statuses, retries, and output storage.
+#[test]
+fn test_export_junit_equivalence() {
+    let env_info = set_env_vars_for_test();
+    let p = TempProject::new(&env_info).unwrap();
+    let cache_dir = create_cache_dir(&p);
+    let temp_root = p.temp_root();
+    let (_user_config_dir, user_config_path) = create_record_user_config();
+
+    const RUN_ID: &str = "71000001-0000-0000-0000-000000000001";
+
+    // Record a full run. The default profile configures junit.path, so the
+    // live JUnit report is written as part of the run.
+    let run_output = cli_with_recording(&env_info, &p, &cache_dir, &user_config_path, Some(RUN_ID))
+        .args(["run", "--workspace", "--all-targets"])
+        .unchecked(true)
+        .output();
+    assert_eq!(
+        run_output.exit_status.code(),
+        Some(NextestExitCode::TEST_RUN_FAILED),
+        "run should fail due to failing tests: {run_output}"
+    );
+
+    let live_junit = fs::read_to_string(p.junit_path("default")).expect("live JUnit report exists");
+
+    // Export from the store by `latest`.
+    let exported = export_junit_stdout(&env_info, &p, &cache_dir, &user_config_path, &["latest"]);
+    assert_eq!(
+        exported, live_junit,
+        "exported JUnit equals the live report"
+    );
+
+    // The exported report also passes the fixture model checks.
+    let exported_path = temp_root.join("exported-junit.xml");
+    fs::write(&exported_path, &exported).expect("wrote exported JUnit");
+    check_run_output_with_junit(&run_output.stderr, &exported_path, RunProperties::empty());
+
+    // Export by full run ID and by unique prefix.
+    for selector in [RUN_ID, "7100"] {
+        let exported =
+            export_junit_stdout(&env_info, &p, &cache_dir, &user_config_path, &[selector]);
+        assert_eq!(
+            exported, live_junit,
+            "export by {selector} equals the live report"
+        );
+    }
+
+    // Export with -o writes to a file.
+    let output_path = temp_root.join("output-junit.xml");
+    let out = cli_with_recording(&env_info, &p, &cache_dir, &user_config_path, None)
+        .args([
+            "store",
+            "export-junit",
+            "latest",
+            "-o",
+            output_path.as_str(),
+        ])
+        .output();
+    assert!(
+        out.exit_status.success(),
+        "export-junit -o should succeed: {out}"
+    );
+    let from_file = fs::read_to_string(&output_path).expect("exported file exists");
+    assert_eq!(
+        from_file, live_junit,
+        "export via -o equals the live report"
+    );
+
+    // --report-name overrides only the report name.
+    let renamed = export_junit_stdout(
+        &env_info,
+        &p,
+        &cache_dir,
+        &user_config_path,
+        &["latest", "--report-name", "custom-name"],
+    );
+    assert!(
+        renamed.contains(r#"<testsuites name="custom-name""#),
+        "report name is overridden: {renamed}"
+    );
+    assert_eq!(
+        renamed.replace(
+            r#"<testsuites name="custom-name""#,
+            r#"<testsuites name="nextest-run""#
+        ),
+        live_junit,
+        "--report-name changes only the report name"
+    );
+
+    // Export from a portable recording.
+    let archive_path = temp_root.join(format!("nextest-run-{RUN_ID}.zip"));
+    let export_output = cli_with_recording(&env_info, &p, &cache_dir, &user_config_path, None)
+        .args([
+            "store",
+            "export",
+            RUN_ID,
+            "--archive-file",
+            archive_path.as_str(),
+        ])
+        .output();
+    assert!(
+        export_output.exit_status.success(),
+        "store export should succeed: {export_output}"
+    );
+    let exported = export_junit_stdout(
+        &env_info,
+        &p,
+        &cache_dir,
+        &user_config_path,
+        &[archive_path.as_str()],
+    );
+    assert_eq!(
+        exported, live_junit,
+        "export from portable recording equals the live report"
+    );
+
+    // Export from a named pipe (non-seekable input, as with process
+    // substitution).
+    let archive_bytes = fs::read(&archive_path).expect("read archive bytes");
+    let (pipe_path, writer_thread) = named_pipe::create_and_spawn_writer(temp_root, archive_bytes);
+    let pipe_output = CargoNextestCli::for_test(&env_info)
+        .args([
+            "--user-config-file",
+            user_config_path.as_str(),
+            "store",
+            "export-junit",
+            "-R",
+            pipe_path.as_str(),
+        ])
+        .output();
+    let writer_result = writer_thread.join();
+    writer_result.expect("writer thread completed without panic");
+    assert!(
+        pipe_output.exit_status.success(),
+        "export-junit from named pipe should succeed: {pipe_output}"
+    );
+    assert_eq!(
+        pipe_output.stdout_as_str(),
+        live_junit,
+        "export from named pipe equals the live report"
+    );
+}
+
+/// JUnit export from a stress-run recording.
+///
+/// Coverage: the report builder keys test suites by stress index, and the
+/// exported report must equal the live report for a stress run.
+#[test]
+fn test_export_junit_stress_run() {
+    let env_info = set_env_vars_for_test();
+    let p = TempProject::new(&env_info).unwrap();
+    let cache_dir = create_cache_dir(&p);
+    let (_user_config_dir, user_config_path) = create_record_user_config();
+
+    const RUN_ID: &str = "72000001-0000-0000-0000-000000000001";
+
+    let stress_output =
+        cli_with_recording(&env_info, &p, &cache_dir, &user_config_path, Some(RUN_ID))
+            .args(["run", "--stress-count", "3", "-E", "test(=test_success)"])
+            .output();
+    assert!(
+        stress_output.exit_status.success(),
+        "stress run should succeed: {stress_output}"
+    );
+
+    let live_junit = fs::read_to_string(p.junit_path("default")).expect("live JUnit report exists");
+    assert!(
+        live_junit.contains("@stress-0") && live_junit.contains("@stress-2"),
+        "live report has per-stress-index suites: {live_junit}"
+    );
+
+    let exported = export_junit_stdout(&env_info, &p, &cache_dir, &user_config_path, &["latest"]);
+    assert_eq!(
+        exported, live_junit,
+        "exported JUnit equals the live report for a stress run"
+    );
+}
+
+/// JUnit export from a rerun recording.
+///
+/// Coverage: reruns are independent recordings; the export of a rerun must
+/// equal the rerun's live report.
+#[test]
+fn test_export_junit_rerun() {
+    let env_info = set_env_vars_for_test();
+    let p = TempProject::new(&env_info).unwrap();
+    let cache_dir = create_cache_dir(&p);
+    let (_user_config_dir, user_config_path) = create_record_user_config();
+
+    const INITIAL_RUN_ID: &str = "73000001-0000-0000-0000-000000000001";
+    const RERUN_ID: &str = "73000002-0000-0000-0000-000000000002";
+
+    let initial_output = cli_with_recording(
+        &env_info,
+        &p,
+        &cache_dir,
+        &user_config_path,
+        Some(INITIAL_RUN_ID),
+    )
+    .args(["run", "--workspace", "--all-targets"])
+    .unchecked(true)
+    .output();
+    assert_eq!(
+        initial_output.exit_status.code(),
+        Some(NextestExitCode::TEST_RUN_FAILED),
+        "initial run should fail due to failing tests: {initial_output}"
+    );
+
+    let rerun_output =
+        cli_with_recording(&env_info, &p, &cache_dir, &user_config_path, Some(RERUN_ID))
+            .args(["run", "--rerun", INITIAL_RUN_ID])
+            .unchecked(true)
+            .output();
+    assert_eq!(
+        rerun_output.exit_status.code(),
+        Some(NextestExitCode::TEST_RUN_FAILED),
+        "rerun should fail because failing tests still fail: {rerun_output}"
+    );
+
+    // The live junit.xml was overwritten by the rerun, so it describes the
+    // rerun.
+    let live_junit = fs::read_to_string(p.junit_path("default")).expect("live JUnit report exists");
+
+    let exported = export_junit_stdout(&env_info, &p, &cache_dir, &user_config_path, &[RERUN_ID]);
+    assert_eq!(
+        exported, live_junit,
+        "exported JUnit equals the rerun's live report"
+    );
+}
+
+/// JUnit export from a --no-capture recording.
+///
+/// Coverage: with --no-capture, outputs are not stored; the exported report
+/// contains the "(stdout not captured)" sentinels, the same as the live
+/// report.
+#[test]
+fn test_export_junit_no_capture() {
+    let env_info = set_env_vars_for_test();
+    let p = TempProject::new(&env_info).unwrap();
+    let cache_dir = create_cache_dir(&p);
+    let (_user_config_dir, user_config_path) = create_record_user_config();
+
+    const RUN_ID: &str = "74000001-0000-0000-0000-000000000001";
+
+    // Use a failing test so failure output storage applies (the default
+    // profile stores failure output).
+    let recording = cli_with_recording(&env_info, &p, &cache_dir, &user_config_path, Some(RUN_ID))
+        .args(["run", "--no-capture", "-E", "test(=test_failure_assert)"])
+        .unchecked(true)
+        .output();
+    assert_eq!(
+        recording.exit_status.code(),
+        Some(NextestExitCode::TEST_RUN_FAILED),
+        "recording with failing test should fail: {recording}"
+    );
+
+    let live_junit = fs::read_to_string(p.junit_path("default")).expect("live JUnit report exists");
+
+    let exported = export_junit_stdout(&env_info, &p, &cache_dir, &user_config_path, &["latest"]);
+    assert_eq!(
+        exported, live_junit,
+        "exported JUnit equals the live report for a no-capture run"
+    );
+    assert!(
+        exported.contains("(stdout not captured)"),
+        "exported report has the not-captured sentinel: {exported}"
+    );
+}
+
+/// Strips the trailing RunFinished event from a recording's run.log.zst,
+/// simulating a run that crashed before completion.
+fn strip_run_finished_event(runs_dir: &Utf8Path, run_id: &str) {
+    let log_path = runs_dir.join(run_id).join("run.log.zst");
+    let compressed = fs::read(&log_path).expect("read run.log.zst");
+    let decompressed =
+        zstd::stream::decode_all(compressed.as_slice()).expect("decompressed run.log.zst");
+    let text = String::from_utf8(decompressed).expect("run.log is UTF-8");
+    let mut lines: Vec<&str> = text.lines().collect();
+    let last = lines.pop().expect("run.log has events");
+    assert!(
+        last.contains(r#""kind":"run-finished""#),
+        "last event is run-finished: {last}"
+    );
+    let updated = lines.join("\n") + "\n";
+    let recompressed =
+        zstd::stream::encode_all(updated.as_bytes(), 3).expect("compressed run.log.zst");
+    fs::write(&log_path, recompressed).expect("wrote run.log.zst");
+}
+
+/// Marks a run's status as incomplete in runs.json.zst.
+fn mark_run_incomplete(runs_dir: &Utf8Path, run_id: &str) {
+    let runs_json_path = runs_dir.join("runs.json.zst");
+    let compressed = fs::read(&runs_json_path).expect("read runs.json.zst");
+    let decompressed =
+        zstd::stream::decode_all(compressed.as_slice()).expect("decompressed runs.json.zst");
+    let mut list: serde_json::Value =
+        serde_json::from_slice(&decompressed).expect("parsed runs.json.zst as JSON");
+    let runs = list
+        .get_mut("runs")
+        .expect("runs.json.zst has a runs field")
+        .as_array_mut()
+        .expect("runs is an array");
+    let run = runs
+        .iter_mut()
+        .find(|run| run["run-id"] == run_id)
+        .expect("run entry exists");
+    run["status"] = serde_json::json!({"status": "incomplete"});
+    let updated = serde_json::to_vec(&list).expect("serialized runs.json.zst");
+    let recompressed =
+        zstd::stream::encode_all(updated.as_slice(), 3).expect("compressed runs.json.zst");
+    fs::write(&runs_json_path, recompressed).expect("wrote runs.json.zst");
+}
+
+/// JUnit export from an incomplete recording.
+///
+/// Coverage: a run whose event log has no RunFinished event (a crashed run)
+/// exports with a warning, and the report trailer (run ID, timestamp, time) is
+/// synthesized from the recorded run metadata.
+#[test]
+fn test_export_junit_incomplete_run() {
+    let env_info = set_env_vars_for_test();
+    let p = TempProject::new(&env_info).unwrap();
+    let cache_dir = create_cache_dir(&p);
+    let (_user_config_dir, user_config_path) = create_record_user_config();
+
+    const RUN_ID: &str = "75000001-0000-0000-0000-000000000001";
+
+    let recording = cli_with_recording(&env_info, &p, &cache_dir, &user_config_path, Some(RUN_ID))
+        .args(["run", "-E", "test(=test_success)"])
+        .output();
+    assert!(
+        recording.exit_status.success(),
+        "recording should succeed: {recording}"
+    );
+
+    // Simulate a crashed run: no RunFinished event, and an incomplete status.
+    let runs_dir = find_runs_dir(&cache_dir).expect("runs directory should exist");
+    strip_run_finished_event(&runs_dir, RUN_ID);
+    mark_run_incomplete(&runs_dir, RUN_ID);
+
+    let out = cli_with_recording(&env_info, &p, &cache_dir, &user_config_path, None)
+        .args(["store", "export-junit", RUN_ID])
+        .output();
+    assert!(
+        out.exit_status.success(),
+        "export-junit for an incomplete run should succeed: {out}"
+    );
+    assert!(
+        out.stderr_as_str()
+            .contains("the exported JUnit report may be incomplete"),
+        "warning about the incomplete run is shown: {out}"
+    );
+
+    let exported = out.stdout_as_str();
+    assert!(
+        exported.contains(&format!(r#"uuid="{RUN_ID}""#)),
+        "synthesized trailer has the run ID: {exported}"
+    );
+    assert!(
+        exported.contains("timestamp=") && exported.contains("time="),
+        "synthesized trailer has a timestamp and elapsed time: {exported}"
+    );
+    assert!(
+        exported.contains("test_success"),
+        "the finished test is present: {exported}"
+    );
+}
+
+/// JUnit export from a recording whose metadata reports store format 2.1.
+///
+/// Coverage: the minor-version compatibility check accepts recordings made by
+/// older nextest versions. (Reading old payloads with missing 2.2 fields is
+/// covered by serde-default unit tests in nextest-runner.)
+#[test]
+fn test_export_junit_from_2_1_recording() {
+    let env_info = set_env_vars_for_test();
+    let p = TempProject::new(&env_info).unwrap();
+    let cache_dir = create_cache_dir(&p);
+    let (_user_config_dir, user_config_path) = create_record_user_config();
+
+    const RUN_ID: &str = "75000002-0000-0000-0000-000000000002";
+
+    let recording = cli_with_recording(&env_info, &p, &cache_dir, &user_config_path, Some(RUN_ID))
+        .env(FORCE_STORE_FORMAT_VERSION_ENV, "2.1")
+        .args(["run", "-E", "test(=test_success)"])
+        .output();
+    assert!(
+        recording.exit_status.success(),
+        "recording should succeed: {recording}"
+    );
+
+    let live_junit = fs::read_to_string(p.junit_path("default")).expect("live JUnit report exists");
+    let exported = export_junit_stdout(&env_info, &p, &cache_dir, &user_config_path, &[RUN_ID]);
+    assert_eq!(
+        exported, live_junit,
+        "exported JUnit equals the live report for a 2.1-labeled recording"
     );
 }

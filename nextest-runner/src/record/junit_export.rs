@@ -152,3 +152,37 @@ fn junit_load_output(kind: &TestEventKindSummary<RecordingSpec>) -> LoadOutput {
         TestEventKindSummary::Core(_) => LoadOutput::Skip,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{record::summary::RecordedJunitOpts, run_mode::NextestRunMode};
+
+    #[test]
+    fn report_name_precedence() {
+        let recorded = RecordOpts::new(
+            NextestRunMode::Test,
+            Some(RecordedJunitOpts::new("recorded-name".to_owned())),
+        );
+        let not_recorded = RecordOpts::new(NextestRunMode::Test, None);
+
+        // The CLI override wins over the recorded name.
+        assert_eq!(
+            resolve_report_name(Some("cli-name".to_owned()), &recorded),
+            "cli-name"
+        );
+        // The recorded name wins over the default.
+        assert_eq!(resolve_report_name(None, &recorded), "recorded-name");
+        // The CLI override wins over the default.
+        assert_eq!(
+            resolve_report_name(Some("cli-name".to_owned()), &not_recorded),
+            "cli-name"
+        );
+        // Recordings without a JUnit snapshot (store format 2.1 and earlier)
+        // fall back to the default.
+        assert_eq!(
+            resolve_report_name(None, &not_recorded),
+            DEFAULT_JUNIT_REPORT_NAME
+        );
+    }
+}
