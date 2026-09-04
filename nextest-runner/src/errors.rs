@@ -1666,6 +1666,18 @@ pub enum WriteEventError {
         #[source]
         error: quick_junit::SerializeError,
     },
+
+    /// The JUnit report requires test output that was not loaded from the
+    /// recording.
+    ///
+    /// This indicates a bug in the output load decider used by the JUnit
+    /// export path: it must load output for every event fed to the report
+    /// builder.
+    #[error(
+        "test output required by the JUnit report was not loaded from the recording \
+         (this is a bug in nextest, please report it)"
+    )]
+    JunitOutputNotLoaded,
 }
 
 /// An error occurred while constructing a [`CargoConfigs`](crate::cargo_config::CargoConfigs)

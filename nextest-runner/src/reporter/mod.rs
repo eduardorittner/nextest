@@ -15,6 +15,7 @@ pub mod structured;
 #[cfg(test)]
 pub(crate) mod test_helpers;
 
+pub use aggregator::JunitReportBuilder;
 pub(crate) use displayer::{DisplayConfig, DisplayReporter, DisplayReporterBuilder, DisplayerKind};
 pub use displayer::{
     FinalStatusLevel, MaxProgressRunning, OutputLoadDecider, ShowProgress, StatusLevel,

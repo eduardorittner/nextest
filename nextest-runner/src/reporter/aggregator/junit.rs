@@ -24,11 +24,13 @@ use crate::{
     },
     run_mode::NextestRunMode,
 };
+use chrono::{DateTime, FixedOffset};
 use debug_ignore::DebugIgnore;
 use indexmap::IndexMap;
 use nextest_metadata::RustBinaryId;
 use quick_junit::{
-    FlakyOrRerun, NonSuccessKind, Report, TestCase, TestCaseStatus, TestRerun, TestSuite, XmlString,
+    FlakyOrRerun, NonSuccessKind, Report, ReportUuid, TestCase, TestCaseStatus, TestRerun,
+    TestSuite, XmlString,
 };
 use std::{fmt, fs::File, time::Duration};
 
@@ -37,26 +39,81 @@ static STDOUT_NOT_CAPTURED: &str = "(stdout not captured)";
 static STDERR_NOT_CAPTURED: &str = "(stderr not captured)";
 static PROCESS_FAILED_TO_START: &str = "(process failed to start)";
 
+/// The live JUnit aggregator: builds a JUnit report from test events and
+/// writes it to the configured path when the run finishes.
 #[derive(Clone, Debug)]
 pub(super) struct MetadataJunit<'cfg> {
-    mode: NextestRunMode,
     config: JunitConfig<'cfg>,
-    test_suites: DebugIgnore<IndexMap<SuiteKey<'cfg>, TestSuite>>,
+    builder: JunitReportBuilder<'cfg>,
 }
 
 impl<'cfg> MetadataJunit<'cfg> {
     pub(super) fn new(mode: NextestRunMode, config: JunitConfig<'cfg>) -> Self {
-        Self {
-            mode,
-            config,
-            test_suites: DebugIgnore(IndexMap::new()),
-        }
+        let builder = JunitReportBuilder::new(mode, config.report_name());
+        Self { config, builder }
     }
 
     pub(super) fn write_event(
         &mut self,
         event: Box<TestEvent<'cfg>>,
     ) -> Result<(), WriteEventError> {
+        self.builder.write_event(*event)?;
+        if let Some(report) = self.builder.take_report() {
+            self.write_report(&report)?;
+        }
+        Ok(())
+    }
+
+    /// Writes the report to the configured path.
+    fn write_report(&self, report: &Report) -> Result<(), WriteEventError> {
+        let junit_path = self.config.path();
+        let junit_dir = junit_path.parent().expect("junit path must have a parent");
+        std::fs::create_dir_all(junit_dir).map_err(|error| WriteEventError::Fs {
+            file: junit_dir.to_path_buf(),
+            error,
+        })?;
+
+        let f = File::create(junit_path).map_err(|error| WriteEventError::Fs {
+            file: junit_path.to_path_buf(),
+            error,
+        })?;
+        report.serialize(f).map_err(|error| WriteEventError::Junit {
+            file: junit_path.to_path_buf(),
+            error,
+        })
+    }
+}
+
+/// Builds a JUnit [`Report`] from test events.
+///
+/// This type contains the full event-to-JUnit conversion logic. It is used by
+/// the live JUnit aggregator, and by `cargo nextest store export-junit` with
+/// events reconstructed from a recording. Because both paths share this code,
+/// an exported report is identical to the live report for the same run.
+#[derive(Clone, Debug)]
+pub struct JunitReportBuilder<'cfg> {
+    mode: NextestRunMode,
+    report_name: String,
+    test_suites: DebugIgnore<IndexMap<SuiteKey<'cfg>, TestSuite>>,
+    report: Option<Report>,
+}
+
+impl<'cfg> JunitReportBuilder<'cfg> {
+    /// Creates a new builder with the given run mode and report name.
+    pub fn new(mode: NextestRunMode, report_name: impl Into<String>) -> Self {
+        Self {
+            mode,
+            report_name: report_name.into(),
+            test_suites: DebugIgnore(IndexMap::new()),
+            report: None,
+        }
+    }
+
+    /// Processes a test event.
+    ///
+    /// A `RunFinished` event builds the report, which then becomes available
+    /// via [`Self::take_report`].
+    pub fn write_event(&mut self, event: TestEvent<'cfg>) -> Result<(), WriteEventError> {
         // Copy mode at the start to avoid borrow checker conflicts.
         let mode = self.mode;
         match event.kind {
@@ -108,7 +165,7 @@ impl<'cfg> MetadataJunit<'cfg> {
                     &run_status.output,
                     store_stdout_stderr,
                     TestcaseOrRerun::Testcase(&mut testcase),
-                );
+                )?;
 
                 test_suite.add_test_case(testcase);
 
@@ -208,7 +265,7 @@ impl<'cfg> MetadataJunit<'cfg> {
                         &rerun.output,
                         junit_store_failure_output,
                         TestcaseOrRerun::Rerun(&mut test_rerun),
-                    );
+                    )?;
 
                     // TODO: also publish time? it won't be standard JUnit (but maybe that's ok?)
                     testcase_status.add_rerun(test_rerun);
@@ -237,7 +294,7 @@ impl<'cfg> MetadataJunit<'cfg> {
                     &main_status.output,
                     store_stdout_stderr,
                     TestcaseOrRerun::Testcase(&mut testcase),
-                );
+                )?;
 
                 testsuite.add_test_case(testcase);
             }
@@ -273,35 +330,45 @@ impl<'cfg> MetadataJunit<'cfg> {
                 elapsed,
                 ..
             } => {
-                // Write out the report to the given file.
-                let mut report = Report::new(self.config.report_name());
-                report
-                    .set_report_uuid(run_id)
-                    .set_timestamp(start_time)
-                    .set_time(elapsed)
-                    .add_test_suites(self.test_suites.drain(..).map(|(_, testsuite)| testsuite));
-
-                let junit_path = self.config.path();
-                let junit_dir = junit_path.parent().expect("junit path must have a parent");
-                std::fs::create_dir_all(junit_dir).map_err(|error| WriteEventError::Fs {
-                    file: junit_dir.to_path_buf(),
-                    error,
-                })?;
-
-                let f = File::create(junit_path).map_err(|error| WriteEventError::Fs {
-                    file: junit_path.to_path_buf(),
-                    error,
-                })?;
-                report
-                    .serialize(f)
-                    .map_err(|error| WriteEventError::Junit {
-                        file: junit_path.to_path_buf(),
-                        error,
-                    })?;
+                self.report = Some(self.build_report(run_id, start_time, elapsed));
             }
         }
 
         Ok(())
+    }
+
+    /// Returns the report built from a `RunFinished` event, if one was seen.
+    pub fn take_report(&mut self) -> Option<Report> {
+        self.report.take()
+    }
+
+    /// Builds the report with an explicitly supplied trailer.
+    ///
+    /// Used for incomplete runs whose event log has no `RunFinished` event, in
+    /// which case the trailer values come from run metadata recorded at run
+    /// start.
+    pub fn build_report_with_trailer(
+        mut self,
+        run_id: ReportUuid,
+        start_time: DateTime<FixedOffset>,
+        elapsed: Duration,
+    ) -> Report {
+        self.build_report(run_id, start_time, elapsed)
+    }
+
+    fn build_report(
+        &mut self,
+        run_id: ReportUuid,
+        start_time: DateTime<FixedOffset>,
+        elapsed: Duration,
+    ) -> Report {
+        let mut report = Report::new(self.report_name.as_str());
+        report
+            .set_report_uuid(run_id)
+            .set_timestamp(start_time)
+            .set_time(elapsed)
+            .add_test_suites(self.test_suites.drain(..).map(|(_, testsuite)| testsuite));
+        report
     }
 
     fn testsuite_for_setup_script(
@@ -511,7 +578,7 @@ fn set_execute_status_props(
     exec_output: &ChildExecutionOutputDescription<LiveSpec>,
     store_stdout_stderr: bool,
     mut out: TestcaseOrRerun<'_>,
-) {
+) -> Result<(), WriteEventError> {
     // Currently we only aggregate test results, so always specify UnitKind::Test.
     let description = UnitErrorDescription::new(UnitKind::Test, exec_output);
     if let Some(errors) = description.all_error_list() {
@@ -547,11 +614,11 @@ fn set_execute_status_props(
                 output: ChildOutputDescription::NotLoaded,
                 ..
             } => {
-                unreachable!(
-                    "attempted to store stdout/stderr from output that was not loaded \
-                     (the JUnit reporter is not used during replay, where NotLoaded \
-                     is produced)"
-                );
+                // The live path always has loaded output, and the export path
+                // must load output for every event it feeds to the builder.
+                // Reaching this arm indicates a bug in the export path's
+                // output load decider.
+                return Err(WriteEventError::JunitOutputNotLoaded);
             }
             ChildExecutionOutputDescription::StartError(_) => {
                 out.set_system_out(PROCESS_FAILED_TO_START)
@@ -559,6 +626,8 @@ fn set_execute_status_props(
             }
         }
     }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -810,7 +879,8 @@ mod tests {
                 &case.output,
                 case.store_stdout_stderr,
                 TestcaseOrRerun::Testcase(&mut testcase),
-            );
+            )
+            .expect("loaded output never fails");
             assert_eq!(
                 get_message(&testcase.status),
                 case.message,
@@ -902,8 +972,9 @@ mod tests {
             ))
             .expect("write_event for skipped test succeeds");
 
-        assert_eq!(junit.test_suites.len(), 1, "one test suite added");
+        assert_eq!(junit.builder.test_suites.len(), 1, "one test suite added");
         let (_, suite) = junit
+            .builder
             .test_suites
             .get_index(0)
             .expect("first test suite exists");
@@ -955,7 +1026,7 @@ mod tests {
             .expect("write_event for skipped test succeeds");
 
         assert_eq!(
-            junit.test_suites.len(),
+            junit.builder.test_suites.len(),
             0,
             "no test suite added when the policy is None"
         );
