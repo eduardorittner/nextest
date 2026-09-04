@@ -397,28 +397,19 @@ impl<'p, Source: Copy> TestSettings<'p, Source> {
             success_output.unwrap_or_else(|| Source::track_profile(profile.success_output()));
         let failure_output =
             failure_output.unwrap_or_else(|| Source::track_profile(profile.failure_output()));
-        let junit_store_success_output = junit_store_success_output.unwrap_or_else(|| {
-            // If the profile doesn't have JUnit enabled, success output can just be false.
-            Source::track_profile(profile.junit().is_some_and(|j| j.store_success_output()))
-        });
-        let junit_store_failure_output = junit_store_failure_output.unwrap_or_else(|| {
-            // If the profile doesn't have JUnit enabled, failure output can just be false.
-            Source::track_profile(profile.junit().is_some_and(|j| j.store_failure_output()))
-        });
-        let junit_report_skipped = junit_report_skipped.unwrap_or_else(|| {
-            Source::track_profile(
-                profile
-                    .junit()
-                    .map_or(ReportSkipPolicy::default(), |j| j.report_skipped()),
-            )
-        });
-        let junit_flaky_fail_status = junit_flaky_fail_status.unwrap_or_else(|| {
-            Source::track_profile(
-                profile
-                    .junit()
-                    .map_or(JunitFlakyFailStatus::default(), |j| j.flaky_fail_status()),
-            )
-        });
+        // JUnit policy settings resolve independently of whether a JUnit path
+        // is configured: recordings bake these values into events, and a JUnit
+        // report may be exported from a recording even if live JUnit output was
+        // disabled during the run.
+        let junit_settings = profile.junit_settings();
+        let junit_store_success_output = junit_store_success_output
+            .unwrap_or_else(|| Source::track_profile(junit_settings.store_success_output()));
+        let junit_store_failure_output = junit_store_failure_output
+            .unwrap_or_else(|| Source::track_profile(junit_settings.store_failure_output()));
+        let junit_report_skipped = junit_report_skipped
+            .unwrap_or_else(|| Source::track_profile(junit_settings.report_skipped()));
+        let junit_flaky_fail_status = junit_flaky_fail_status
+            .unwrap_or_else(|| Source::track_profile(junit_settings.flaky_fail_status()));
 
         TestSettings {
             threads_required,
@@ -1407,6 +1398,85 @@ mod tests {
         let overrides = profile.settings_for(NextestRunMode::Test, &query);
         assert_eq!(overrides.retries(), RetryPolicy::new_without_delay(0));
         assert_eq!(overrides.junit_report_skipped(), ReportSkipPolicy::All);
+    }
+
+    /// JUnit policy settings and overrides resolve even when no JUnit path is
+    /// configured, so that recordings carry correct values for later export.
+    #[test]
+    fn test_overrides_junit_without_path() {
+        let config_contents = indoc! {r#"
+            [[profile.default.overrides]]
+            filter = "test(override_me)"
+            junit = { store-failure-output = false, report-skipped = "all" }
+
+            [profile.default.junit]
+            store-success-output = true
+        "#};
+
+        let workspace_dir = tempdir().unwrap();
+
+        let graph = temp_workspace(&workspace_dir, config_contents);
+        let package_id = graph.workspace().iter().next().unwrap().id();
+
+        let pcx = ParseContext::new(&graph);
+
+        let nextest_config_result = NextestConfig::from_sources(
+            graph.workspace().root(),
+            &pcx,
+            None,
+            &[][..],
+            &Default::default(),
+        )
+        .expect("config is valid");
+        let profile = nextest_config_result
+            .profile("default")
+            .expect("valid profile name")
+            .apply_build_platforms(&build_platforms());
+        assert!(profile.junit().is_none(), "no junit path is configured");
+
+        let target_binary_query = binary_query(
+            &graph,
+            package_id,
+            "lib",
+            "my-binary",
+            BuildPlatform::Target,
+        );
+
+        // This query matches the override.
+        let test_name = TestCaseName::new("override_me");
+        let query = TestQuery {
+            binary_query: target_binary_query.to_query(),
+            test_name: &test_name,
+        };
+        let overrides = profile.settings_for(NextestRunMode::Test, &query);
+        // For clarity.
+        #[expect(clippy::bool_assert_comparison)]
+        {
+            assert_eq!(overrides.junit_store_success_output(), true);
+            assert_eq!(overrides.junit_store_failure_output(), false);
+        }
+        assert_eq!(overrides.junit_report_skipped(), ReportSkipPolicy::All);
+
+        // This query does not match any overrides, so the profile settings
+        // apply: store-success-output from the profile, everything else from
+        // the defaults.
+        let test_name = TestCaseName::new("no_match");
+        let query = TestQuery {
+            binary_query: target_binary_query.to_query(),
+            test_name: &test_name,
+        };
+        let overrides = profile.settings_for(NextestRunMode::Test, &query);
+        // For clarity.
+        #[expect(clippy::bool_assert_comparison)]
+        {
+            assert_eq!(overrides.junit_store_success_output(), true);
+            assert_eq!(
+                overrides.junit_store_failure_output(),
+                true,
+                "store-failure-output defaults to true"
+            );
+        }
+        assert_eq!(overrides.junit_report_skipped(), ReportSkipPolicy::None);
     }
 
     /// Test that bench.slow-timeout works correctly in overrides.

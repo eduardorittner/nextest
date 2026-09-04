@@ -1235,17 +1235,30 @@ impl<'cfg> EvaluatableProfile<'cfg> {
         TestSettings::new(self, run_mode, query)
     }
 
-    /// Returns the JUnit configuration for this profile.
-    pub fn junit(&self) -> Option<JunitConfig<'cfg>> {
-        let settings = JunitSettings {
-            path: profile_field_optional!(self.junit.path.as_deref()),
+    /// Returns the resolved JUnit policy settings for this profile.
+    ///
+    /// Unlike [`Self::junit`], these settings are available even when the
+    /// profile does not configure a JUnit path. Test events (and therefore run
+    /// recordings) bake these values in, so they must resolve independently of
+    /// whether live JUnit output is enabled.
+    pub fn junit_settings(&self) -> JunitSettings<'cfg> {
+        JunitSettings {
             report_name: profile_field_from_ref!(self.junit.report_name.as_deref()),
             store_success_output: profile_field!(self.junit.store_success_output),
             store_failure_output: profile_field!(self.junit.store_failure_output),
             report_skipped: profile_field!(self.junit.report_skipped),
             flaky_fail_status: profile_field!(self.junit.flaky_fail_status),
-        };
-        JunitConfig::new(self.store_dir(), settings)
+        }
+    }
+
+    /// Returns the JUnit configuration for this profile, if a JUnit path is
+    /// configured.
+    pub fn junit(&self) -> Option<JunitConfig<'cfg>> {
+        JunitConfig::new(
+            self.store_dir(),
+            profile_field_optional!(self.junit.path.as_deref()),
+            self.junit_settings(),
+        )
     }
 
     /// Returns the profile that this profile inherits from.

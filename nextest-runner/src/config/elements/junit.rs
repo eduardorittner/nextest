@@ -27,29 +27,24 @@ pub enum JunitFlakyFailStatus {
 /// Global JUnit configuration stored within a profile.
 ///
 /// Returned by an [`EvaluatableProfile`](crate::config::core::EvaluatableProfile).
+/// Present only when the profile configures a JUnit path; the policy settings
+/// on their own are always available via [`JunitSettings`].
 #[derive(Clone, Debug)]
 pub struct JunitConfig<'cfg> {
     path: Utf8PathBuf,
-    report_name: &'cfg str,
-    store_success_output: bool,
-    store_failure_output: bool,
-    report_skipped: ReportSkipPolicy,
-    flaky_fail_status: JunitFlakyFailStatus,
+    settings: JunitSettings<'cfg>,
 }
 
 impl<'cfg> JunitConfig<'cfg> {
     pub(in crate::config) fn new(
         store_dir: &Utf8Path,
+        path: Option<&Utf8Path>,
         settings: JunitSettings<'cfg>,
     ) -> Option<Self> {
-        let path = settings.path?;
+        let path = path?;
         Some(Self {
             path: store_dir.join(path),
-            report_name: settings.report_name,
-            store_success_output: settings.store_success_output,
-            store_failure_output: settings.store_failure_output,
-            report_skipped: settings.report_skipped,
-            flaky_fail_status: settings.flaky_fail_status,
+            settings,
         })
     }
 
@@ -58,6 +53,69 @@ impl<'cfg> JunitConfig<'cfg> {
         &self.path
     }
 
+    /// Returns the name of the JUnit report.
+    pub fn report_name(&self) -> &'cfg str {
+        self.settings.report_name
+    }
+
+    /// Returns true if success output should be stored.
+    pub fn store_success_output(&self) -> bool {
+        self.settings.store_success_output
+    }
+
+    /// Returns true if failure output should be stored.
+    pub fn store_failure_output(&self) -> bool {
+        self.settings.store_failure_output
+    }
+
+    /// Returns the policy controlling which skipped tests should be emitted as
+    /// `<testcase>` elements with a `<skipped>` child.
+    pub fn report_skipped(&self) -> ReportSkipPolicy {
+        self.settings.report_skipped
+    }
+
+    /// Returns the flaky-fail status for JUnit reporting.
+    pub fn flaky_fail_status(&self) -> JunitFlakyFailStatus {
+        self.settings.flaky_fail_status
+    }
+
+    /// Creates a `JunitConfig` directly for unit tests, bypassing the profile
+    /// inheritance chain.
+    #[cfg(test)]
+    pub(crate) fn new_for_test(
+        path: Utf8PathBuf,
+        report_name: &'cfg str,
+        report_skipped: ReportSkipPolicy,
+    ) -> Self {
+        Self {
+            path,
+            settings: JunitSettings {
+                report_name,
+                store_success_output: false,
+                store_failure_output: false,
+                report_skipped,
+                flaky_fail_status: JunitFlakyFailStatus::Failure,
+            },
+        }
+    }
+}
+
+/// Resolved JUnit policy settings from the profile inheritance chain.
+///
+/// Unlike [`JunitConfig`], these settings are available even when the profile
+/// does not configure a JUnit path. Test events (and therefore run recordings)
+/// bake these values in, so they must resolve independently of whether live
+/// JUnit output is enabled.
+#[derive(Clone, Copy, Debug)]
+pub struct JunitSettings<'cfg> {
+    pub(in crate::config) report_name: &'cfg str,
+    pub(in crate::config) store_success_output: bool,
+    pub(in crate::config) store_failure_output: bool,
+    pub(in crate::config) report_skipped: ReportSkipPolicy,
+    pub(in crate::config) flaky_fail_status: JunitFlakyFailStatus,
+}
+
+impl<'cfg> JunitSettings<'cfg> {
     /// Returns the name of the JUnit report.
     pub fn report_name(&self) -> &'cfg str {
         self.report_name
@@ -83,35 +141,6 @@ impl<'cfg> JunitConfig<'cfg> {
     pub fn flaky_fail_status(&self) -> JunitFlakyFailStatus {
         self.flaky_fail_status
     }
-
-    /// Creates a `JunitConfig` directly for unit tests, bypassing the profile
-    /// inheritance chain.
-    #[cfg(test)]
-    pub(crate) fn new_for_test(
-        path: Utf8PathBuf,
-        report_name: &'cfg str,
-        report_skipped: ReportSkipPolicy,
-    ) -> Self {
-        Self {
-            path,
-            report_name,
-            store_success_output: false,
-            store_failure_output: false,
-            report_skipped,
-            flaky_fail_status: JunitFlakyFailStatus::Failure,
-        }
-    }
-}
-
-/// Pre-resolved JUnit settings from the profile inheritance chain.
-#[derive(Clone, Debug)]
-pub(in crate::config) struct JunitSettings<'cfg> {
-    pub(in crate::config) path: Option<&'cfg Utf8Path>,
-    pub(in crate::config) report_name: &'cfg str,
-    pub(in crate::config) store_success_output: bool,
-    pub(in crate::config) store_failure_output: bool,
-    pub(in crate::config) report_skipped: ReportSkipPolicy,
-    pub(in crate::config) flaky_fail_status: JunitFlakyFailStatus,
 }
 
 #[derive(Clone, Debug)]
@@ -181,12 +210,17 @@ pub(in crate::config) struct JunitImpl {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::config::{core::NextestConfig, elements::ReportSkipPolicy, utils::test_helpers::*};
     use camino_tempfile::tempdir;
     use indoc::indoc;
     use nextest_filtering::ParseContext;
 
-    fn report_skipped_for(config_contents: &str, profile: &str) -> ReportSkipPolicy {
+    fn junit_check(
+        config_contents: &str,
+        profile: &str,
+        check: impl FnOnce(Option<JunitConfig<'_>>, JunitSettings<'_>),
+    ) {
         let workspace_dir = tempdir().unwrap();
         let graph = temp_workspace(&workspace_dir, config_contents);
         let pcx = ParseContext::new(&graph);
@@ -199,13 +233,23 @@ mod tests {
         )
         .expect("config file should parse");
 
-        nextest_config
+        let profile = nextest_config
             .profile(profile)
             .expect("profile should exist")
-            .apply_build_platforms(&build_platforms())
-            .junit()
-            .expect("junit config should be present")
-            .report_skipped()
+            .apply_build_platforms(&build_platforms());
+        check(profile.junit(), profile.junit_settings());
+    }
+
+    fn report_skipped_for(config_contents: &str, profile: &str) -> ReportSkipPolicy {
+        let mut policy = None;
+        junit_check(config_contents, profile, |junit, _| {
+            policy = Some(
+                junit
+                    .expect("junit config should be present")
+                    .report_skipped(),
+            );
+        });
+        policy.expect("check closure ran")
     }
 
     #[test]
@@ -243,5 +287,63 @@ mod tests {
             report-skipped = "all"
         "#};
         assert_eq!(report_skipped_for(config, "default"), ReportSkipPolicy::All);
+    }
+
+    #[test]
+    fn settings_resolve_without_path() {
+        // Policy settings must resolve to their profile defaults even when no
+        // JUnit path is configured, so that recordings carry correct values
+        // for later export.
+        let config = indoc! {r#"
+            [profile.default]
+            retries = 0
+        "#};
+        junit_check(config, "default", |junit, settings| {
+            assert!(junit.is_none(), "no junit path means no JunitConfig");
+            assert_eq!(settings.report_name(), "nextest-run");
+            assert!(!settings.store_success_output());
+            assert!(
+                settings.store_failure_output(),
+                "store-failure-output defaults to true"
+            );
+            assert_eq!(settings.report_skipped(), ReportSkipPolicy::None);
+            assert_eq!(settings.flaky_fail_status(), JunitFlakyFailStatus::Failure);
+        });
+    }
+
+    #[test]
+    fn settings_honor_policy_keys_without_path() {
+        let config = indoc! {r#"
+            [profile.default.junit]
+            report-name = "my-report"
+            store-success-output = true
+            store-failure-output = false
+            report-skipped = "all"
+            flaky-fail-status = "success"
+        "#};
+        junit_check(config, "default", |junit, settings| {
+            assert!(junit.is_none(), "no junit path means no JunitConfig");
+            assert_eq!(settings.report_name(), "my-report");
+            assert!(settings.store_success_output());
+            assert!(!settings.store_failure_output());
+            assert_eq!(settings.report_skipped(), ReportSkipPolicy::All);
+            assert_eq!(settings.flaky_fail_status(), JunitFlakyFailStatus::Success);
+        });
+    }
+
+    #[test]
+    fn settings_inherited_by_custom_profile_without_path() {
+        let config = indoc! {r#"
+            [profile.default.junit]
+            report-skipped = "ignored"
+
+            [profile.ci]
+            retries = 1
+        "#};
+        junit_check(config, "ci", |junit, settings| {
+            assert!(junit.is_none(), "no junit path means no JunitConfig");
+            assert_eq!(settings.report_skipped(), ReportSkipPolicy::Ignored);
+            assert!(settings.store_failure_output());
+        });
     }
 }
