@@ -11,14 +11,19 @@ use crate::{
 use camino::{Utf8Path, Utf8PathBuf};
 use chrono::Utc;
 use clap::{Args, Subcommand, ValueEnum};
+use guppy::graph::PackageGraph;
 use nextest_runner::{
+    errors::{JunitExportError, RecordReadError},
     helpers::ThemeCharacters,
+    list::TestList,
+    output_spec::RecordingSpec,
     pager::PagedOutput,
     record::{
-        ChromeTraceGroupBy, ChromeTraceMessageFormat, DisplayRunList, PortableRecording,
-        PortableRecordingWriter, PruneKind, RecordReader, RecordRetentionPolicy, RecordedRunStatus,
-        RunIdIndex, RunIdOrRecordingSelector, RunIdSelector, RunStore, STORE_FORMAT_VERSION,
-        SnapshotWithReplayability, Styles as RecordStyles, convert_to_chrome_trace,
+        ChromeTraceGroupBy, ChromeTraceMessageFormat, DisplayRunList, JunitExportOpts,
+        PortableRecording, PortableRecordingWriter, PruneKind, RecordReader, RecordRetentionPolicy,
+        RecordedRunInfo, RecordedRunStatus, RunIdIndex, RunIdOrRecordingSelector, RunIdSelector,
+        RunStore, STORE_FORMAT_VERSION, SnapshotWithReplayability, StoreReader,
+        Styles as RecordStyles, TestEventSummary, convert_to_chrome_trace, export_junit_report,
         has_zip_extension, records_state_dir,
     },
     redact::Redactor,
@@ -45,6 +50,11 @@ pub(crate) enum StoreCommand {
     /// The output can be loaded into Chrome's chrome://tracing or Perfetto UI
     /// (ui.perfetto.dev) for a timeline view of test parallelism and execution.
     ExportChromeTrace(ExportChromeTraceOpts),
+    /// Export a recorded run as a JUnit XML report.
+    ///
+    /// The report is identical to the report a live run with `junit.path`
+    /// configured would have written.
+    ExportJunit(ExportJunitOpts),
 }
 
 /// Common arguments for selecting a run by ID, `latest`, or recording path.
@@ -380,6 +390,197 @@ impl ExportChromeTraceOpts {
     }
 }
 
+/// Options for the `cargo nextest store export-junit` command.
+#[derive(Debug, Args)]
+pub(crate) struct ExportJunitOpts {
+    #[command(flatten)]
+    selector: RunIdOrRecordingArgs,
+
+    /// Name for the JUnit report.
+    ///
+    /// Defaults to the name recorded at run time, or "nextest-run" for
+    /// recordings made by older nextest versions.
+    #[arg(long, value_name = "NAME")]
+    report_name: Option<String>,
+
+    /// Output file path. Defaults to stdout.
+    #[arg(short = 'o', long = "output", value_name = "PATH")]
+    output: Option<Utf8PathBuf>,
+}
+
+impl ExportJunitOpts {
+    fn exec_from_store(
+        &self,
+        run_id_selector: &RunIdSelector,
+        state_dir: &Utf8Path,
+        styles: &RecordStyles,
+    ) -> Result<i32> {
+        let store =
+            RunStore::new(state_dir).map_err(|err| ExpectedError::RecordSetupError { err })?;
+
+        let snapshot = store
+            .lock_shared()
+            .map_err(|err| ExpectedError::RecordSetupError { err })?
+            .into_snapshot();
+
+        let resolved = snapshot
+            .resolve_run_id(run_id_selector)
+            .map_err(|err| ExpectedError::RunIdResolutionError { err })?;
+        let run_id = resolved.run_id;
+
+        let run = snapshot
+            .get_run(run_id)
+            .expect("run ID was just resolved, so the run should exist");
+
+        // Check the store format version before opening the archive. Otherwise,
+        // an incompatible run would fail partway through event deserialization
+        // with a confusing error.
+        if let Err(incompatibility) = run
+            .store_format_version
+            .check_readable_by(STORE_FORMAT_VERSION)
+        {
+            return Err(ExpectedError::StoreVersionIncompatible {
+                run_id,
+                incompatibility,
+            });
+        }
+
+        if matches!(
+            run.status,
+            RecordedRunStatus::Incomplete | RecordedRunStatus::Unknown
+        ) {
+            warn!(
+                "run {} is {}: the exported JUnit report may be incomplete",
+                run_id.style(styles.label),
+                run.status.short_status_str(),
+            );
+        }
+
+        let mut reader = RecordReader::open(&snapshot.runs_dir().run_dir(run_id))
+            .map_err(|err| ExpectedError::RecordReadError { err })?;
+
+        reader
+            .load_dictionaries()
+            .map_err(|err| ExpectedError::RecordReadError { err })?;
+
+        let mut events = reader
+            .events()
+            .map_err(|err| ExpectedError::RecordReadError { err })?;
+
+        let xml_bytes = self.export_common(&mut reader, &mut events, run)?;
+
+        let formatted_run_id = styles.format_run_id(run_id, Some(snapshot.run_id_index()));
+        self.write_output(&xml_bytes, &formatted_run_id)?;
+        Ok(0)
+    }
+
+    fn exec_from_archive(&self, archive_path: &Utf8Path, styles: &RecordStyles) -> Result<i32> {
+        let mut archive = PortableRecording::open(archive_path)
+            .map_err(|err| ExpectedError::PortableRecordingReadError { err })?;
+
+        let run_info = archive.run_info();
+        let run_id = run_info.run_id;
+
+        if matches!(
+            run_info.status,
+            RecordedRunStatus::Incomplete | RecordedRunStatus::Unknown
+        ) {
+            warn!(
+                "run {} is {}: the exported JUnit report may be incomplete",
+                run_id.style(styles.label),
+                run_info.status.short_status_str(),
+            );
+        }
+
+        let run_log = archive
+            .read_run_log()
+            .map_err(|err| ExpectedError::PortableRecordingReadError { err })?;
+
+        let mut store_reader = archive
+            .open_store()
+            .map_err(|err| ExpectedError::PortableRecordingReadError { err })?;
+
+        store_reader
+            .load_dictionaries()
+            .map_err(|err| ExpectedError::RecordReadError { err })?;
+
+        let mut events = run_log
+            .events()
+            .map_err(|err| ExpectedError::RecordReadError { err })?;
+
+        let xml_bytes = self.export_common(&mut store_reader, &mut events, &run_info)?;
+
+        let formatted_run_id = styles.format_run_id(run_id, None);
+        self.write_output(&xml_bytes, &formatted_run_id)?;
+        Ok(0)
+    }
+
+    /// Common export logic shared between store-based and archive-based
+    /// export: reconstruct the test list from the archived metadata, run the
+    /// export engine, and serialize the report to XML.
+    fn export_common(
+        &self,
+        store_reader: &mut dyn StoreReader,
+        events: &mut dyn Iterator<
+            Item = std::result::Result<TestEventSummary<RecordingSpec>, RecordReadError>,
+        >,
+        run_info: &RecordedRunInfo,
+    ) -> Result<Vec<u8>> {
+        let cargo_metadata_json = store_reader
+            .read_cargo_metadata()
+            .map_err(|err| ExpectedError::RecordReadError { err })?;
+        let graph = PackageGraph::from_json(&cargo_metadata_json)
+            .map_err(|err| ExpectedError::cargo_metadata_parse_error(None, err))?;
+
+        let test_list_summary = store_reader
+            .read_test_list()
+            .map_err(|err| ExpectedError::RecordReadError { err })?;
+
+        let record_opts = store_reader
+            .read_record_opts()
+            .map_err(|err| ExpectedError::RecordReadError { err })?;
+
+        let test_list = TestList::from_summary(&graph, &test_list_summary, record_opts.run_mode)
+            .map_err(|err| ExpectedError::TestListFromSummaryError { err })?;
+
+        let mut opts = JunitExportOpts::new();
+        opts.report_name_override = self.report_name.clone();
+
+        let report = export_junit_report(
+            &test_list,
+            &record_opts,
+            store_reader,
+            events,
+            opts,
+            run_info,
+        )
+        .map_err(|err| ExpectedError::JunitExportError { err })?;
+
+        let mut xml_bytes = Vec::new();
+        report
+            .serialize(&mut xml_bytes)
+            .map_err(|err| ExpectedError::JunitExportError {
+                err: JunitExportError::SerializeError(err),
+            })?;
+        Ok(xml_bytes)
+    }
+
+    fn write_output(&self, xml_bytes: &[u8], formatted_run_id: &str) -> Result<()> {
+        match &self.output {
+            Some(path) => {
+                std::fs::write(path, xml_bytes).map_err(|err| ExpectedError::WriteError { err })?;
+                info!("wrote JUnit report for run {formatted_run_id} to {path}");
+            }
+            None => {
+                std::io::stdout()
+                    .write_all(xml_bytes)
+                    .map_err(|err| ExpectedError::WriteError { err })?;
+            }
+        }
+        Ok(())
+    }
+}
+
 fn zip_extension_path(input: &str) -> Result<Utf8PathBuf, &'static str> {
     let path = Utf8PathBuf::from(input);
     if has_zip_extension(&path) {
@@ -609,6 +810,15 @@ impl StoreCommand {
                 opts.exec(&state_dir, &styles)
             }
             Self::ExportChromeTrace(opts) => match opts.selector.resolved_selector() {
+                RunIdOrRecordingSelector::RecordingPath(path) => {
+                    opts.exec_from_archive(path, &styles)
+                }
+                RunIdOrRecordingSelector::RunId(run_id_selector) => {
+                    let state_dir = resolve_state_dir()?;
+                    opts.exec_from_store(run_id_selector, &state_dir, &styles)
+                }
+            },
+            Self::ExportJunit(opts) => match opts.selector.resolved_selector() {
                 RunIdOrRecordingSelector::RecordingPath(path) => {
                     opts.exec_from_archive(path, &styles)
                 }

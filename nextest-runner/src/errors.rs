@@ -2933,7 +2933,6 @@ pub enum ChromeTraceError {
 
 /// Errors that can occur while exporting a JUnit report from a recording.
 #[derive(Debug, Error)]
-#[non_exhaustive]
 pub enum JunitExportError {
     /// An error occurred while reading recorded events.
     #[error("error reading recorded events")]

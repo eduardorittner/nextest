@@ -459,6 +459,11 @@ pub enum ExpectedError {
         #[source]
         err: ChromeTraceError,
     },
+    #[error("error exporting JUnit report")]
+    JunitExportError {
+        #[source]
+        err: JunitExportError,
+    },
     #[error("write error")]
     WriteError {
         #[source]
@@ -679,6 +684,12 @@ impl ExpectedError {
             } => NextestExitCode::SETUP_ERROR,
             Self::ChromeTraceExportError {
                 err: ChromeTraceError::SerializeError(_),
+            } => NextestExitCode::WRITE_OUTPUT_ERROR,
+            Self::JunitExportError {
+                err: JunitExportError::ReadError(_) | JunitExportError::BuildReport(_),
+            } => NextestExitCode::SETUP_ERROR,
+            Self::JunitExportError {
+                err: JunitExportError::SerializeError(_),
             } => NextestExitCode::WRITE_OUTPUT_ERROR,
             Self::WriteError { .. } | Self::SchemaWriteError { .. } => {
                 NextestExitCode::WRITE_OUTPUT_ERROR
@@ -1407,6 +1418,10 @@ impl ExpectedError {
             }
             Self::ChromeTraceExportError { err } => {
                 error!("error exporting Chrome trace");
+                Some(err as &dyn Error)
+            }
+            Self::JunitExportError { err } => {
+                error!("error exporting JUnit report");
                 Some(err as &dyn Error)
             }
             Self::WriteError { err } => {
