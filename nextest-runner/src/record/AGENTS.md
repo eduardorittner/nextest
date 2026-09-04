@@ -262,6 +262,34 @@ This means corrupt logs where start events are missing in the middle will fail t
 
 `ChromeTraceArgs` uses `#[serde(untagged)]` for serialization only (the type is never deserialized), so the AGENTS.md guideline about untagged deserializers does not apply.
 
+## JUnit export
+
+`junit_export.rs` converts recorded events to a JUnit XML report. Invoked via `cargo nextest store export-junit`.
+
+### Public API
+
+- `export_junit_report(test_list, record_opts, store_reader, events, opts, run_info) -> Result<quick_junit::Report, JunitExportError>`: Converts an iterator of `TestEventSummary<RecordingSpec>` to a JUnit `Report`.
+- `JunitExportOpts`: Export options (`report_name_override`).
+- `DEFAULT_JUNIT_REPORT_NAME`: The fallback report name (`"nextest-run"`).
+
+### Design
+
+Unlike the Chrome trace converter (which operates directly on the storage format), the JUnit exporter goes through the replay infrastructure: `ReplayContext::convert_event` reconstructs live `TestEvent`s, which are fed to the same `JunitReportBuilder` (`reporter/aggregator/junit.rs`) used by the live JUnit aggregator. Both paths share the status-mapping logic, so an exported report is identical to the live report for the same run.
+
+Key behaviors:
+
+- **Per-test policy values ride in the events.** `TestFinished` carries `junit_store_success_output`, `junit_store_failure_output`, and `junit_flaky_fail_status`; `TestSkipped` carries `junit_report_skipped`; `SetupScriptFinished` carries the script store flags (store format 2.2+). No repository configuration is read at export time, so exports work for portable recordings on machines without the workspace.
+- **Report name precedence**: CLI `--report-name` override, then `RecordOpts::junit.report_name` from the archive (2.2+), then `DEFAULT_JUNIT_REPORT_NAME`.
+- **Output loading**: A JUnit-specific decider (`junit_load_output`) loads output for every `SetupScriptFinished` and `TestFinished` event, and skips `TestAttemptFailedWillRetry` (retries are reported from `TestFinished`'s run statuses) and all core events. It is intentionally separate from the display-driven `OutputLoadDecider`.
+- **Incomplete runs**: If the log has no `RunFinished` event, the report trailer is synthesized from `RecordedRunInfo` (`run_id`, `started_at`) and the last event's elapsed time. This makes JUnit available for crashed runs.
+- **Conversion errors** for single events are warnings (the export continues), the same as replay. Read errors abort the export.
+
+### Error types
+
+- `JunitExportError::ReadError`: Wraps `RecordReadError` from the event iterator.
+- `JunitExportError::BuildReport`: Wraps `WriteEventError` from the report builder (including `JunitOutputNotLoaded`, which indicates a load-decider bug).
+- `JunitExportError::SerializeError`: Wraps `quick_junit::SerializeError` from final serialization (constructed by the CLI).
+
 ## Testing patterns
 
 ### Property-based tests for rerun logic
@@ -292,6 +320,7 @@ Errors are split into:
 - `RecordPruneError`: Pruning errors (collected but don't stop operation).
 - `ReplayConversionError`: Replay errors (test not found, invalid data).
 - `ChromeTraceError`: Chrome trace conversion errors (read errors or serialization).
+- `JunitExportError`: JUnit export errors (read errors, report building, serialization).
 
 Finalization errors (`RecordFinalizeWarning`) are non-fatal—the recording itself completed.
 

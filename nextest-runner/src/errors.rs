@@ -2931,6 +2931,23 @@ pub enum ChromeTraceError {
     SerializeError(#[source] serde_json::Error),
 }
 
+/// Errors that can occur while exporting a JUnit report from a recording.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum JunitExportError {
+    /// An error occurred while reading recorded events.
+    #[error("error reading recorded events")]
+    ReadError(#[source] RecordReadError),
+
+    /// An error occurred while building the JUnit report.
+    #[error("error building JUnit report")]
+    BuildReport(#[source] WriteEventError),
+
+    /// An error occurred while serializing the report to XML.
+    #[error("error serializing JUnit report")]
+    SerializeError(#[source] quick_junit::SerializeError),
+}
+
 /// An error that occurred while reconstructing a TestList from a summary.
 ///
 /// Returned by [`TestList::from_summary`](crate::list::TestList::from_summary).

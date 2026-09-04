@@ -324,9 +324,11 @@ impl<'a> DisplayReporter<'a> {
 /// any chance the output will be displayed, either immediately or at the end of
 /// the run.
 ///
-/// Currently, replays only use a display reporter, and do not use JUnit or
-/// libtest reporters. If and when support for those is added to replay, this
-/// decider must be updated to account for their output requirements as well.
+/// This decider is display-driven: it only accounts for the display reporter's
+/// output requirements. JUnit export from recordings uses its own load
+/// decision in `crate::record::junit_export`. If and when replay itself gains
+/// support for other reporters (e.g. libtest), this decider must be updated to
+/// account for their output requirements as well.
 #[derive(Debug)]
 pub struct OutputLoadDecider {
     pub(super) status_level: StatusLevel,

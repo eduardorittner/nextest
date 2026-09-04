@@ -28,6 +28,7 @@ mod chrome_trace;
 pub mod dicts;
 mod display;
 mod format;
+mod junit_export;
 mod portable;
 mod reader;
 mod recorder;
@@ -56,6 +57,7 @@ pub use format::{
     STORE_FORMAT_VERSION, STORE_ZIP_FILE_NAME, StoreFormatMajorVersion, StoreFormatMinorVersion,
     StoreFormatVersion, StoreVersionIncompatibility, TEST_LIST_JSON_PATH, has_zip_extension,
 };
+pub use junit_export::{DEFAULT_JUNIT_REPORT_NAME, JunitExportOpts, export_junit_report};
 pub use portable::{
     ExtractOuterFileResult, PortableRecording, PortableRecordingEventIter, PortableRecordingResult,
     PortableRecordingRunLog, PortableRecordingWriter, PortableStoreReader,
