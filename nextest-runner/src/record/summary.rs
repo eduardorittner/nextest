@@ -55,12 +55,40 @@ pub struct RecordOpts {
     /// The run mode (test or benchmark).
     #[serde(default)]
     pub run_mode: NextestRunMode,
+
+    /// Resolved JUnit report settings, captured at record time.
+    ///
+    /// `None` for recordings made by nextest versions that predate this field
+    /// (store format 2.1 and earlier).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub junit: Option<RecordedJunitOpts>,
 }
 
 impl RecordOpts {
     /// Creates a new `RecordOpts` with the given settings.
-    pub fn new(run_mode: NextestRunMode) -> Self {
-        Self { run_mode }
+    pub fn new(run_mode: NextestRunMode, junit: Option<RecordedJunitOpts>) -> Self {
+        Self { run_mode, junit }
+    }
+}
+
+/// Resolved JUnit report settings, captured at record time.
+///
+/// Stored in the archive so that a JUnit report can be exported from a
+/// recording without access to the repository configuration. The per-test
+/// policy values (output storage, skip reporting, flaky-fail status) ride
+/// inside the recorded events; this type holds the report-level values.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub struct RecordedJunitOpts {
+    /// The name of the JUnit report.
+    pub report_name: String,
+}
+
+impl RecordedJunitOpts {
+    /// Creates a new `RecordedJunitOpts` with the given settings.
+    pub fn new(report_name: String) -> Self {
+        Self { report_name }
     }
 }
 
@@ -391,6 +419,16 @@ pub enum OutputEventKind<S: OutputSpec> {
         program: String,
         /// The arguments to the program.
         args: Vec<String>,
+        /// Whether to store success output in JUnit.
+        ///
+        /// Defaults to false for recordings made before store format 2.2.
+        #[serde(default)]
+        junit_store_success_output: bool,
+        /// Whether to store failure output in JUnit.
+        ///
+        /// Defaults to false for recordings made before store format 2.2.
+        #[serde(default)]
+        junit_store_failure_output: bool,
         /// Whether output capture was disabled.
         no_capture: bool,
         /// The execution status.
@@ -604,8 +642,8 @@ impl TestEventKindSummary<LiveSpec> {
                 script_id,
                 program,
                 args,
-                junit_store_success_output: _,
-                junit_store_failure_output: _,
+                junit_store_success_output,
+                junit_store_failure_output,
                 no_capture,
                 run_status,
             } => Self::Output(OutputEventKind::SetupScriptFinished {
@@ -615,6 +653,8 @@ impl TestEventKindSummary<LiveSpec> {
                 script_id,
                 program,
                 args: args.to_vec(),
+                junit_store_success_output,
+                junit_store_failure_output,
                 no_capture,
                 run_status,
             }),
@@ -947,6 +987,98 @@ mod tests {
             }
             other => panic!("expected TestSkipped, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn setup_script_finished_junit_flags_default_when_absent() {
+        // Store format 2.1 and earlier did not record the setup-script JUnit
+        // flags; they must default to false.
+        let event: OutputEventKind<RecordingSpec> = OutputEventKind::SetupScriptFinished {
+            stress_index: None,
+            index: 0,
+            total: 1,
+            script_id: ScriptId::new("my-script".into()).expect("valid script ID"),
+            program: "my-script".to_owned(),
+            args: vec![],
+            junit_store_success_output: true,
+            junit_store_failure_output: true,
+            no_capture: false,
+            run_status: SetupScriptExecuteStatus {
+                output: crate::reporter::events::ChildExecutionOutputDescription::Output {
+                    result: None,
+                    output: ZipStoreOutputDescription::Combined {
+                        output: ZipStoreOutput::Empty,
+                    },
+                    errors: None,
+                },
+                result: crate::reporter::events::ExecutionResultDescription::Pass,
+                start_time: chrono::Utc::now().fixed_offset(),
+                time_taken: Duration::ZERO,
+                is_slow: false,
+                env_map: None,
+                error_summary: None,
+            },
+        };
+
+        let mut value = serde_json::to_value(&event).expect("serialization succeeds");
+        let object = value
+            .as_object_mut()
+            .expect("serialized event is a JSON object");
+        assert!(
+            object.remove("junit-store-success-output").is_some(),
+            "junit-store-success-output field is present before removal"
+        );
+        assert!(
+            object.remove("junit-store-failure-output").is_some(),
+            "junit-store-failure-output field is present before removal"
+        );
+
+        let deserialized: OutputEventKind<RecordingSpec> =
+            serde_json::from_value(value).expect("deserialization without the fields succeeds");
+        match deserialized {
+            OutputEventKind::SetupScriptFinished {
+                junit_store_success_output,
+                junit_store_failure_output,
+                ..
+            } => {
+                assert!(
+                    !junit_store_success_output,
+                    "a missing junit-store-success-output field defaults to false"
+                );
+                assert!(
+                    !junit_store_failure_output,
+                    "a missing junit-store-failure-output field defaults to false"
+                );
+            }
+            other => panic!("expected SetupScriptFinished, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn record_opts_junit_defaults_when_absent() {
+        // Store format 2.1 and earlier did not record JUnit settings; the
+        // field must default to None.
+        let opts: RecordOpts =
+            serde_json::from_str(r#"{"run-mode": "test"}"#).expect("deserialization succeeds");
+        assert!(
+            opts.junit.is_none(),
+            "a missing junit field defaults to None"
+        );
+
+        let opts = RecordOpts::new(
+            NextestRunMode::Test,
+            Some(RecordedJunitOpts::new("my-report".to_owned())),
+        );
+        let json = serde_json::to_string(&opts).expect("serialization succeeds");
+        let roundtrip: RecordOpts = serde_json::from_str(&json).expect("deserialization succeeds");
+        assert_eq!(
+            roundtrip
+                .junit
+                .as_ref()
+                .map(|junit| junit.report_name.as_str()),
+            Some("my-report"),
+            "junit settings round-trip"
+        );
     }
 
     #[test]

@@ -769,6 +769,8 @@ impl ChromeTraceConverter {
                 script_id,
                 program: _,
                 args: _,
+                junit_store_success_output: _,
+                junit_store_failure_output: _,
                 no_capture: _,
                 run_status,
             } => {
@@ -2142,6 +2144,8 @@ mod tests {
                     script_id: script_id.clone(),
                     program: "/bin/setup".to_string(),
                     args: vec![],
+                    junit_store_success_output: false,
+                    junit_store_failure_output: false,
                     no_capture: false,
                     run_status: SetupScriptExecuteStatus {
                         output: empty_output(),
@@ -2402,6 +2406,8 @@ mod tests {
                     script_id: script_id.clone(),
                     program: "/bin/setup".to_string(),
                     args: vec![],
+                    junit_store_success_output: false,
+                    junit_store_failure_output: false,
                     no_capture: false,
                     run_status: SetupScriptExecuteStatus {
                         output: empty_output(),

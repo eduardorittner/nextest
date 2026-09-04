@@ -488,6 +488,8 @@ impl SerializeTestEventContext<'_> {
                 script_id,
                 program,
                 args,
+                junit_store_success_output,
+                junit_store_failure_output,
                 no_capture,
                 run_status,
             } => {
@@ -499,6 +501,8 @@ impl SerializeTestEventContext<'_> {
                     script_id,
                     program,
                     args,
+                    junit_store_success_output,
+                    junit_store_failure_output,
                     no_capture,
                     run_status,
                 })

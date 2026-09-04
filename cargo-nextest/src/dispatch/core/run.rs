@@ -32,8 +32,9 @@ use nextest_runner::{
     list::{BinaryList, ListProgressOptions, TestExecuteContext, TestList},
     record::{
         ComputedRerunInfo, PortableRecording, RecordOpts, RecordReader, RecordRetentionPolicy,
-        RecordSession, RecordSessionConfig, RerunRootInfo, RunIdOrRecordingSelector, RunIdSelector,
-        RunStore, STORE_FORMAT_VERSION, Styles as RecordStyles, records_state_dir,
+        RecordSession, RecordSessionConfig, RecordedJunitOpts, RerunRootInfo,
+        RunIdOrRecordingSelector, RunIdSelector, RunStore, STORE_FORMAT_VERSION,
+        Styles as RecordStyles, records_state_dir,
     },
     redact::Redactor,
     reporter::{
@@ -845,12 +846,17 @@ fn setup_recording_session(
     config: RecordSessionConfig<'_>,
     cargo_metadata_json: Arc<String>,
     test_list: &TestList<'_>,
+    profile: &nextest_runner::config::core::EvaluatableProfile<'_>,
     structured_reporter: &mut structured::StructuredReporter<'_>,
 ) -> Option<RecordSession> {
     match RecordSession::setup(config) {
         Ok(setup) => {
             let record = structured::RecordReporter::new(setup.recorder);
-            let opts = RecordOpts::new(test_list.mode());
+            // Snapshot the resolved JUnit report settings so that a JUnit
+            // report can be exported from the recording without access to the
+            // repository configuration.
+            let junit = RecordedJunitOpts::new(profile.junit_settings().report_name().to_owned());
+            let opts = RecordOpts::new(test_list.mode(), Some(junit));
             record.write_meta(cargo_metadata_json, test_list.to_summary(), opts);
             structured_reporter.set_record(record);
             Some(setup.session)
@@ -1191,6 +1197,7 @@ impl App {
                 config,
                 self.base.cargo_metadata_json.clone(),
                 &test_list,
+                &profile,
                 &mut structured_reporter,
             )
         } else {
@@ -1438,6 +1445,7 @@ impl App {
                 config,
                 self.base.cargo_metadata_json.clone(),
                 &test_list,
+                &profile,
                 &mut structured_reporter,
             )
         } else {

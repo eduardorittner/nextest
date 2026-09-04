@@ -81,7 +81,7 @@ pub use store::{
     StoreRunFiles, StoreRunsDir, StressCompletedRunStats,
 };
 pub use summary::{
-    CoreEventKind, OutputEventKind, OutputFileName, RecordOpts, StressConditionSummary,
-    StressIndexSummary, TestEventKindSummary, TestEventSummary, ZipStoreOutput,
-    ZipStoreOutputDescription,
+    CoreEventKind, OutputEventKind, OutputFileName, RecordOpts, RecordedJunitOpts,
+    StressConditionSummary, StressIndexSummary, TestEventKindSummary, TestEventSummary,
+    ZipStoreOutput, ZipStoreOutputDescription,
 };

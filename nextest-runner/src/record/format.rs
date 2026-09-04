@@ -254,9 +254,13 @@ pub(super) const RUNS_JSON_FORMAT_VERSION: RunsJsonFormatVersion = RunsJsonForma
 ///   `TestRetryStarted` events.
 ///
 /// - 2.1: `junit_report_skipped` field added to `TestSkipped` events.
+///
+/// - 2.2: `junit_store_success_output` and `junit_store_failure_output` fields
+///   added to `SetupScriptFinished` events; resolved JUnit settings (`junit`)
+///   added to `RecordOpts`.
 pub const STORE_FORMAT_VERSION: StoreFormatVersion = StoreFormatVersion::new(
     StoreFormatMajorVersion::new(2),
-    StoreFormatMinorVersion::new(1),
+    StoreFormatMinorVersion::new(2),
 );
 
 /// Testing-only environment variable to force a specific store format version
